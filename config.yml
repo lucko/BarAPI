@@ -1,5 +1,2 @@
-# Set to false to disable the auto updater
-autoUpdate: true
-testMode: false
 # For the latest spigot fake protocol hacks
 useSpigotHack: false
