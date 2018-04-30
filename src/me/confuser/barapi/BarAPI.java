@@ -2,6 +2,13 @@ package me.confuser.barapi;
 
 import me.confuser.barapi.nms.FakeDragon;
 import me.confuser.barapi.nms.v1_8Fake;
+import me.lucko.helper.bossbar.BossBar;
+import me.lucko.helper.bossbar.BossBarColor;
+import me.lucko.helper.bossbar.BossBarFactory;
+import me.lucko.helper.bossbar.BossBarStyle;
+import me.lucko.helper.plugin.ExtendedJavaPlugin;
+import me.lucko.helper.plugin.ap.Plugin;
+import me.lucko.helper.text.Text;
 import org.apache.commons.lang.Validate;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
@@ -14,10 +21,15 @@ import org.bukkit.event.player.PlayerKickEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.event.player.PlayerRespawnEvent;
 import org.bukkit.event.player.PlayerTeleportEvent;
-import org.bukkit.plugin.java.JavaPlugin;
+import org.bukkit.plugin.ServicePriority;
 
+import javax.annotation.Nonnull;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -25,8 +37,8 @@ import java.util.UUID;
  *
  * @author James Mortemore
  */
-
-public class BarAPI extends JavaPlugin implements Listener {
+@Plugin(name = "BarAPI", hardDepends = {"helper", "ViaVersion"})
+public class BarAPI extends ExtendedJavaPlugin implements Listener, BossBarFactory {
 
     private static boolean useSpigotHack = false;
     private Map<UUID, FakeDragon> players = new HashMap<>();
@@ -57,7 +69,7 @@ public class BarAPI extends JavaPlugin implements Listener {
     }
 
     @Override
-    public void onEnable() {
+    public void enable() {
         getConfig().options().copyDefaults(true);
         saveConfig();
 
@@ -75,27 +87,31 @@ public class BarAPI extends JavaPlugin implements Listener {
 
         if (useSpigotHack) {
             getServer().getScheduler().scheduleSyncRepeatingTask(this, () -> {
-                for (UUID uuid : players.keySet()) {
+                for (UUID uuid : this.players.keySet()) {
                     Player p = Bukkit.getPlayer(uuid);
-                    Util.sendPacket(p, players.get(uuid).getTeleportPacket(getDragonLocation(p.getLocation())));
+                    Util.sendPacket(p, this.players.get(uuid).getTeleportPacket(getDragonLocation(p.getLocation())));
                 }
             }, 0L, 5L);
         }
+
+        // provide helper boss bar service
+        BossBarFactory service = getService(BossBarFactory.class);
+        provideService(BossBarFactory.class, new MixedBossBarFactory(this, service), ServicePriority.High);
     }
 
     @Override
-    public void onDisable() {
+    public void disable() {
         for (Player player : getServer().getOnlinePlayers()) {
             quit(player);
         }
 
-        players.clear();
+        this.players.clear();
 
-        for (int timerID : timers.values()) {
+        for (int timerID : this.timers.values()) {
             Bukkit.getScheduler().cancelTask(timerID);
         }
 
-        timers.clear();
+        this.timers.clear();
     }
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
@@ -135,7 +151,7 @@ public class BarAPI extends JavaPlugin implements Listener {
 
             Util.sendPacket(player, getDragon(player, "").getDestroyPacket());
 
-            players.remove(player.getUniqueId());
+            this.players.remove(player.getUniqueId());
 
             FakeDragon dragon = addDragon(player, loc, message);
             dragon.health = health;
@@ -146,31 +162,6 @@ public class BarAPI extends JavaPlugin implements Listener {
 
     private void quit(Player player) {
         removeBar(player);
-    }
-
-    /**
-     * Set a message for the given player.<br>
-     * It will remain there until the player logs off or another plugin overrides it.<br>
-     * This method will show a full health bar and will cancel any running timers.
-     *
-     * @param player  The player who should see the given message.
-     * @param message The message shown to the player.<br>
-     *                Due to limitations in Minecraft this message cannot be longer than 64 characters.<br>
-     *                It will be cut to that size automatically.
-     */
-    public void setMessage(Player player, String message) {
-        if (hasBar(player)) {
-            removeBar(player);
-        }
-
-        FakeDragon dragon = getDragon(player, message);
-
-        dragon.name = cleanMessage(message);
-        dragon.health = dragon.getMaxHealth();
-
-        cancelTimer(player);
-
-        sendDragon(dragon, player);
     }
 
     /**
@@ -210,7 +201,7 @@ public class BarAPI extends JavaPlugin implements Listener {
      * @return True, if the player has a bar, False otherwise.
      */
     public boolean hasBar(Player player) {
-        return players.get(player.getUniqueId()) != null;
+        return this.players.get(player.getUniqueId()) != null;
     }
 
     /**
@@ -225,64 +216,12 @@ public class BarAPI extends JavaPlugin implements Listener {
 
         FakeDragon dragon = getDragon(player, "");
         Util.sendPacket(player, dragon.getDestroyPacket());
-        players.remove(player.getUniqueId());
+        this.players.remove(player.getUniqueId());
         cancelTimer(player);
-    }
-
-    /**
-     * Modifies the health of an existing bar.<br>
-     * If the player has no bar, this method does nothing.
-     *
-     * @param player  The player whose bar should be modified.
-     * @param percent The percentage of the health bar filled.<br>
-     *                This value must be between 0F and 100F (inclusive).
-     */
-    public void setHealth(Player player, float percent) {
-        if (!hasBar(player))
-            return;
-
-        FakeDragon dragon = getDragon(player, "");
-        dragon.health = (percent / 100f) * dragon.getMaxHealth();
-
-        cancelTimer(player);
-
-        if (percent == 0) {
-            removeBar(player);
-        } else {
-            sendDragon(dragon, player);
-        }
-    }
-
-    /**
-     * Get the health of an existing bar.
-     *
-     * @param player The player whose bar's health should be returned.
-     * @return The current absolute health of the bar.<br>
-     * If the player has no bar, this method returns -1.
-     */
-    public float getHealth(Player player) {
-        if (!hasBar(player))
-            return -1;
-
-        return getDragon(player, "").health;
-    }
-
-    /**
-     * Get the message of an existing bar.
-     *
-     * @param player The player whose bar's message should be returned.
-     * @return The current message displayed to the player.<br>
-     * If the player has no bar, this method returns an empty string.
-     */
-    public String getMessage(Player player) {
-        if (!hasBar(player))
-            return "";
-
-        return getDragon(player, "").name;
     }
 
     private void cancelTimer(Player player) {
-        Integer timerID = timers.remove(player.getUniqueId());
+        Integer timerID = this.timers.remove(player.getUniqueId());
 
         if (timerID != null) {
             Bukkit.getScheduler().cancelTask(timerID);
@@ -296,7 +235,7 @@ public class BarAPI extends JavaPlugin implements Listener {
 
     private FakeDragon getDragon(Player player, String message) {
         if (hasBar(player)) {
-            return players.get(player.getUniqueId());
+            return this.players.get(player.getUniqueId());
         } else
             return addDragon(player, cleanMessage(message));
     }
@@ -304,14 +243,14 @@ public class BarAPI extends JavaPlugin implements Listener {
     private FakeDragon addDragon(Player player, String message) {
         FakeDragon dragon = Util.newDragon(message, getDragonLocation(player.getLocation()));
         Util.sendPacket(player, dragon.getSpawnPacket());
-        players.put(player.getUniqueId(), dragon);
+        this.players.put(player.getUniqueId(), dragon);
         return dragon;
     }
 
     private FakeDragon addDragon(Player player, Location loc, String message) {
         FakeDragon dragon = Util.newDragon(message, getDragonLocation(loc));
         Util.sendPacket(player, dragon.getSpawnPacket());
-        players.put(player.getUniqueId(), dragon);
+        this.players.put(player.getUniqueId(), dragon);
         return dragon;
     }
 
@@ -332,5 +271,132 @@ public class BarAPI extends JavaPlugin implements Listener {
         }
 
         return loc;
+    }
+
+    @Nonnull
+    @Override
+    public BossBar newBossBar() {
+        return new BarApiBossBar();
+    }
+
+    private final class BarApiBossBar implements BossBar {
+        private String title = "null";
+        private double progress = 1d;
+        private boolean visible = true;
+        private final Set<Player> players = new HashSet<>();
+
+        private void update() {
+            for (Player p : this.players) {
+                update(p);
+            }
+        }
+
+        private void update(Player p) {
+            setMessage(p, this.title, (float) (this.progress * 100d));
+        }
+
+        @Nonnull
+        @Override
+        public String title() {
+            return this.title;
+        }
+
+        @Nonnull
+        @Override
+        public BossBar title(@Nonnull String title) {
+            this.title = Text.colorize(title);
+            update();
+            return this;
+        }
+
+        @Override
+        public double progress() {
+            return this.progress;
+        }
+
+        @Nonnull
+        @Override
+        public BossBar progress(double progress) {
+            this.progress = progress;
+            update();
+            return this;
+        }
+
+        @Nonnull
+        @Override
+        public BossBarColor color() {
+            return BossBarColor.defaultColor();
+        }
+
+        @Nonnull
+        @Override
+        public BossBar color(@Nonnull BossBarColor color) {
+            return this;
+        }
+
+        @Nonnull
+        @Override
+        public BossBarStyle style() {
+            return BossBarStyle.defaultStyle();
+        }
+
+        @Nonnull
+        @Override
+        public BossBar style(@Nonnull BossBarStyle style) {
+            return this;
+        }
+
+        @Override
+        public boolean visible() {
+            return this.visible;
+        }
+
+        @Nonnull
+        @Override
+        public BossBar visible(boolean visible) {
+            this.visible = visible;
+
+            if (!visible) {
+                for (Player p : this.players) {
+                    removeBar(p);
+                }
+            } else {
+                update();
+            }
+
+            return this;
+        }
+
+        @Nonnull
+        @Override
+        public List<Player> players() {
+            return new ArrayList<>(this.players);
+        }
+
+        @Override
+        public void addPlayer(@Nonnull Player player) {
+            if (this.players.add(player)) {
+                update(player);
+            }
+        }
+
+        @Override
+        public void removePlayer(@Nonnull Player player) {
+            if (this.players.remove(player)) {
+                removeBar(player);
+            }
+        }
+
+        @Override
+        public void removeAll() {
+            for (Player p : this.players) {
+                removePlayer(p);
+            }
+        }
+
+        @Override
+        public void close() {
+            removeAll();
+        }
     }
 }
